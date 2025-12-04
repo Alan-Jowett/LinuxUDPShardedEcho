@@ -244,7 +244,7 @@ void worker_thread_func(client_worker_context* ctx, size_t payload_size) try {
         }
 
         // Send packets up to allowed sends using sendmmsg batching
-        while (ctx->packets_sent.load(std::memory_order_relaxed) < allowed_sends) {
+        while ((ctx->packets_sent.load(std::memory_order_relaxed) < allowed_sends) && !g_shutdown.load()) {
             bool made_progress = false;
 
             // Try each socket in round-robin and attempt to send a batch on it
