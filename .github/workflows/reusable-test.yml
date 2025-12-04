@@ -41,21 +41,25 @@ jobs:
           fi
 
       - name: Run loopback test
+        working-directory: downloaded_build/${{ inputs.build_dir }}
         run: |
           set -euo pipefail
 
-          SERVER_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server") || true
-          CLIENT_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client") || true
+          SERVER_PATH=$(readlink -f "./echo_server") || true
+          CLIENT_PATH=$(readlink -f "./echo_client") || true
+
+          chmod +x "$SERVER_PATH" || true
+          chmod +x "$CLIENT_PATH" || true
 
           if [ ! -x "$SERVER_PATH" ]; then
             echo "Server binary not found or not executable: $SERVER_PATH"
-            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            ls -la "." || true
             exit 1
           fi
 
           if [ ! -x "$CLIENT_PATH" ]; then
             echo "Client binary not found or not executable: $CLIENT_PATH"
-            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            ls -la "." || true
             exit 1
           fi
 
@@ -97,9 +101,3 @@ jobs:
           if [ "$testPassed" != true ]; then
             exit 1
           fi
-
-      - name: Archive build artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
