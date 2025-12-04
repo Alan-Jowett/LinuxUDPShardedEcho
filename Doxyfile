@@ -1,0 +1,15 @@
+# Minimal Doxyfile for DagIR
+PROJECT_NAME           = "LinuxUDPShardedEcho"
+PROJECT_BRIEF          = "A reference implementation of a highly scalable Windows UDP echo server using Winsock + IOCP with SIO_CPU_AFFINITY and one worker thread per CPU to align NIC RSS"
+PROJECT_NUMBER         = 0.0.0
+OUTPUT_DIRECTORY       = docs
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+EXTRACT_ALL            = YES
+RECURSIVE              = YES
+INPUT                  = include src
+FILE_PATTERNS          = *.h *.hpp *.cpp *.c
+QUIET                  = NO
+WARNINGS               = YES
+GENERATE_TREEVIEW      = YES

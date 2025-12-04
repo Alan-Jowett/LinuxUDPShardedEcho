@@ -12,6 +12,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Option to enable AddressSanitizer
 option(ENABLE_ADDRESS_SANITIZER "Enable AddressSanitizer (ASan) for supported compilers" OFF)
 
+# Install developer convenience scripts (pre-commit hook) only for the top-level project
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  include(cmake/format.cmake OPTIONAL)
+endif()
+
 # Server executable
 add_executable(echo_server
     src/server/main.cpp
@@ -26,8 +31,6 @@ target_include_directories(echo_server PRIVATE
 add_executable(echo_client
     src/client/main.cpp
     src/common/socket_utils.cpp
-    src/common/tdigest.cpp
-    src/common/percentile_estimator.cpp
 )
 
 target_include_directories(echo_client PRIVATE

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 LinuxUDPShardedEcho Contributors
+#
+# Core formatting/check logic (POSIX). This file is the single source of truth
+# for formatting/cppcheck behavior. Wrapper scripts call this when `sh`/`bash`
+# is available; PowerShell wrapper falls back when `sh` is missing.
+
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$HERE/.." && pwd)
+
+# Source canonical extensions list if present
+if [ -f "$HERE/extensions.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$HERE/extensions.sh"
+fi
+
+FIX=0
+if [ "${1:-}" = "--fix" ]; then
+  FIX=1
+fi
+
+cd "$ROOT"
+
+# Build a git pathspec list from SRC_EXTENSIONS
+FILES=""
+for ext in $SRC_EXTENSIONS; do
+  FILES="$FILES -- '*.$ext'"
+done
+FILES=$(eval git ls-files $FILES || true)
+if [ -z "$FILES" ]; then
+  echo "No C/C++ files tracked."
+  exit 0
+fi
+
+# Exclude generated expression outputs
+FILES=$(printf '%s\n' "$FILES" | grep -Ev '^(tests/regression_tests/expression_tree_|tests/regression_tests/expression_bdd_)' || true)
+
+echo "[check-format] Checking formatting for tracked C/C++ files..."
+if [ "$FIX" -eq 1 ]; then
+  echo "[check-format] Applying clang-format to files..."
+  if [ -n "$FILES" ]; then
+    printf '%s\n' "$FILES" | xargs clang-format -i
+  fi
+else
+  # dry-run check
+  if [ -n "$FILES" ]; then
+    printf '%s\n' "$FILES" | xargs clang-format --dry-run --Werror
+  fi || {
+    echo "[check-format] Formatting issues found. Re-run with --fix to apply clang-format." >&2
+    exit 2
+  }
+fi
+
+if command -v cppcheck >/dev/null 2>&1; then
+  echo "[check-format] Running cppcheck..."
+  if [ -n "$FILES" ]; then
+    printf '%s\n' "$FILES" | xargs cppcheck --enable=warning,style --inconclusive --std=c++20 --quiet --check-level=exhaustive
+  fi || {
+    echo "[check-format] cppcheck found issues." >&2
+    exit 3
+  }
+else
+  echo "[check-format] cppcheck not found; skipping static analysis."
+fi
+
+echo "[check-format] Format check complete."
+exit 0

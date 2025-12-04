@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 LinuxUDPShardedEcho Contributors
+
+# Pre-commit hook: run the repository formatting/check helper. This hook is
+# intentionally lightweight: it calls `scripts/check-format.sh` (on POSIX) or
+# `scripts/check-format.ps1` (on Windows/PowerShell) to perform checks and
+# optionally apply fixes.
+
+echo "Running pre-commit format checks"
+
+# Get staged C/C++ files. If none, skip.
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# Determine repository root. Prefer git to locate the top-level directory
+# so this hook works both when invoked from the installed .git/hooks path
+# and when run from the `scripts/` source file during development.
+REPO_ROOT=""
+if REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  : # use REPO_ROOT from git
+else
+  # Fallback: prefer the .git/hooks layout when present, otherwise assume
+  # the script is in a `scripts/` directory one level down from the repo root.
+  if [ -d "$HERE/../.git" ]; then
+    REPO_ROOT=$(cd "$HERE/../.." && pwd)
+  else
+    # Otherwise assume we're in the scripts/ directory and repo root is one level up
+    REPO_ROOT=$(cd "$HERE/.." && pwd)
+  fi
+fi
+
+# Source canonical extensions list if present in the repository
+if [ -f "$REPO_ROOT/scripts/extensions.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$REPO_ROOT/scripts/extensions.sh"
+fi
+
+if [ -n "${SRC_EXTENSIONS:-}" ]; then
+  PATTERN="\\.($(echo "$SRC_EXTENSIONS" | sed 's/ /|/g'))$"
+  STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E "$PATTERN" || true)
+else
+  STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E "\.(cpp|hpp|h|c|cc|cxx)$" || true)
+fi
+if [ -z "$STAGED" ]; then
+  echo "No C/C++ files staged. Skipping."
+  exit 0
+fi
+
+# If the developer has set an environment variable PRE_COMMIT_FIX=1, run with --fix
+FIX_ARG=""
+if [ "${PRE_COMMIT_FIX:-0}" = "1" ]; then
+  FIX_ARG="--fix"
+fi
+
+ROOT_DIR="$REPO_ROOT"
+
+CHECK_EXIT=0
+if command -v pwsh >/dev/null 2>&1 || command -v powershell >/dev/null 2>&1; then
+  # Prefer PowerShell on Windows
+  if [ -f "$ROOT_DIR/scripts/check-format.ps1" ]; then
+    if command -v pwsh >/dev/null 2>&1; then
+      pwsh -NoProfile -NonInteractive -File "$ROOT_DIR/scripts/check-format.ps1" $FIX_ARG
+      CHECK_EXIT=$?
+    else
+      powershell -NoProfile -NonInteractive -File "$ROOT_DIR/scripts/check-format.ps1" $FIX_ARG
+      CHECK_EXIT=$?
+    fi
+    else
+      echo "PowerShell script not found; falling back to bash script"
+      bash "$ROOT_DIR/scripts/check-format.sh" $FIX_ARG
+      CHECK_EXIT=$?
+    fi
+else
+  bash "$ROOT_DIR/scripts/check-format.sh" $FIX_ARG
+  CHECK_EXIT=$?
+fi
+
+# If the check script modified files (when --fix used), re-stage them
+if [ -n "$STAGED" ]; then
+  # Re-add staged files that may have been modified by --fix (handle spaces)
+  while IFS= read -r f; do
+    git add -- "$f" || true
+  done <<< "$STAGED"
+fi
+
+exit $CHECK_EXIT

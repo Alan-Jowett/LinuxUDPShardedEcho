@@ -7,7 +7,7 @@
  * IO Completion Ports to efficiently process incoming datagrams and echo
  * responses back to clients.
  *
- * @copyright Copyright (c) 2025 WinUDPShardedEcho Contributors
+ * @copyright Copyright (c) 2025 LinuxUDPShardedEcho Contributors
  * SPDX-License-Identifier: MIT
  */
 
@@ -118,7 +118,7 @@ void worker_thread_func(server_worker_context* ctx) try {
                 while (true) {
                     bool would_block = post_recv(ctx->socket, buffer, remote_addr, remote_addr_len);
                     if (would_block) {
-                        break; // no more data for now
+                        break;  // no more data for now
                     }
 
                     // Process received datagram: echo it back
@@ -141,9 +141,8 @@ void worker_thread_func(server_worker_context* ctx) try {
                             ctx->packets_sent.fetch_add(1);
                             ctx->bytes_sent.fetch_add(buffer.size());
                         } else if (g_verbose.load()) {
-                            std::osyncstream(std::cerr)
-                                << std::format("[CPU {}] send would block, dropping packet\n",
-                                               ctx->processor_id);
+                            std::osyncstream(std::cerr) << std::format(
+                                "[CPU {}] send would block, dropping packet\n", ctx->processor_id);
                         }
                     }
                 }
@@ -231,9 +230,6 @@ int main(int argc, char* argv[]) try {
         throw std::invalid_argument("Invalid port number");
     }
     int port = static_cast<int>(port_l);
-    if (port <= 0 || port > 65535) {
-        throw std::invalid_argument("Port number out of range");
-    }
 
     uint32_t num_processors = get_processor_count();
     uint32_t num_workers = num_processors;

@@ -6,12 +6,21 @@
  * posting overlapped operations and interacting with IO Completion Ports
  * (epoll) on Windows. It also defines packet framing constants used by the
  * echo server/client.
- * 
- * @copyright Copyright (c) 2025 WinUDPShardedEcho Contributors
+ *
+ * @copyright Copyright (c) 2025 LinuxUDPShardedEcho Contributors
  * SPDX-License-Identifier: MIT
  */
 
 #pragma once
+
+#include <arpa/inet.h>   // inet_pton / inet_ntop
+#include <errno.h>       // errno
+#include <fcntl.h>       // fcntl
+#include <netdb.h>       // getaddrinfo / freeaddrinfo
+#include <netinet/in.h>  // sockaddr_in / sockaddr_in6, htons/htonl
+#include <sys/socket.h>  // AF_INET, AF_INET6, socket, sockaddr, etc.
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdint>
@@ -24,16 +33,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>   // AF_INET, AF_INET6, socket, sockaddr, etc.
-#include <netinet/in.h>   // sockaddr_in / sockaddr_in6, htons/htonl
-#include <arpa/inet.h>    // inet_pton / inet_ntop
-#include <netdb.h>        // getaddrinfo / freeaddrinfo
-#include <fcntl.h>        // fcntl
-#include <errno.h>        // errno
-
 
 // Packet header for tracking sequence numbers
 #pragma pack(push, 1)
@@ -60,14 +59,14 @@ constexpr size_t MAX_PAYLOAD_SIZE = MAX_PACKET_SIZE - HEADER_SIZE;
 
 // Shared configuration constants
 /// Number of simultaneous outstanding asynchronous I/O operations per socket.
-constexpr size_t OUTSTANDING_OPS = 16;            // Number of outstanding I/O operations per socket
+constexpr size_t OUTSTANDING_OPS = 16;  // Number of outstanding I/O operations per socket
 /// Timeout in milliseconds used when polling an epoll for events.
-constexpr uint32_t EPOLL_TIMEOUT_MS = 10;             // EPOLL polling timeout in milliseconds
+constexpr uint32_t EPOLL_TIMEOUT_MS = 10;  // EPOLL polling timeout in milliseconds
 /// Timeout used specifically during shutdown checks on the EPOLL.
 constexpr uint32_t EPOLL_SHUTDOWN_TIMEOUT_MS = 1000;  // EPOLL timeout for shutdown check
 
 class unique_fd {
-public:
+   public:
     explicit unique_fd(int fd = -1) : fd_(fd) {}
     ~unique_fd() {
         if (fd_ != -1) {
@@ -79,9 +78,7 @@ public:
     unique_fd(const unique_fd&) = delete;
     unique_fd& operator=(const unique_fd&) = delete;
     // Enable move
-    unique_fd(unique_fd&& other) noexcept : fd_(other.fd_) {
-        other.fd_ = -1;
-    }
+    unique_fd(unique_fd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
     unique_fd& operator=(unique_fd&& other) noexcept {
         if (this != &other) {
             if (fd_ != -1) {
@@ -107,14 +104,15 @@ public:
         return fd_;
     }
 
-private:
+   private:
     int fd_;
 };
 
 struct socket_exception : public std::exception {
     explicit socket_exception(const std::string& message) : message_(message) {}
     const char* what() const noexcept override { return message_.c_str(); }
-private:
+
+   private:
     std::string message_;
 };
 
@@ -156,8 +154,8 @@ unique_fd create_epoll_and_associate(const unique_fd& sock);
  * @param epoll epoll handle to associate with.
  * @param completion_key Completion key (typically used to identify socket/thread).
  */
-void associate_socket_with_epoll(const unique_fd& sock, unique_fd& epoll,
-                                uintptr_t completion_key);
+void associate_socket_with_epoll(const unique_fd& sock, const unique_fd& epoll,
+                                 uintptr_t completion_key);
 
 /**
  * @brief Set the current thread's processor affinity.

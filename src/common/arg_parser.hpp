@@ -6,8 +6,8 @@
  * command-line options, parse `argc/argv` and query option values. It is
  * intentionally small and forgiving: unknown options are ignored and
  * positional arguments are not collected.
- * 
- * @copyright Copyright (c) 2025 WinUDPShardedEcho Contributors
+ *
+ * @copyright Copyright (c) 2025 LinuxUDPShardedEcho Contributors
  * SPDX-License-Identifier: MIT
  */
 #pragma once

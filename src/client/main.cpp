@@ -7,7 +7,7 @@
  * receives, and sends UDP packets containing a sequence number and timestamp.
  * Received echoes are used to compute RTT and detect lost packets.
  *
- * @copyright Copyright (c) 2025 WinUDPShardedEcho Contributors
+ * @copyright Copyright (c) 2025 LinuxUDPShardedEcho Contributors
  * SPDX-License-Identifier: MIT
  */
 
@@ -303,10 +303,10 @@ void worker_thread_func(client_worker_context* ctx, size_t payload_size) try {
                     uint64_t rtt_ns = now_ns - timestamp_ns;
 
                     // Check if sequence number is outstanding
-                    auto it = ctx->outstanding_sequences.find(seq);
-                    if (it != ctx->outstanding_sequences.end()) {
+                    auto seq_it = ctx->outstanding_sequences.find(seq);
+                    if (seq_it != ctx->outstanding_sequences.end()) {
                         // Valid echo response
-                        ctx->outstanding_sequences.erase(it);
+                        ctx->outstanding_sequences.erase(seq_it);
                         ctx->packets_received.fetch_add(1);
                         ctx->bytes_received.fetch_add(HEADER_SIZE + payload_size);
                         ctx->total_rtt_ns.fetch_add(rtt_ns);
@@ -429,9 +429,6 @@ int main(int argc, char* argv[]) try {
         throw std::invalid_argument("Invalid port number");
     }
     int port = static_cast<int>(port_l);
-    if (port <= 0 || port > 65535) {
-        throw std::invalid_argument("Port number out of range");
-    }
 
     payload_size = static_cast<size_t>(std::strtoul(payload_str.c_str(), nullptr, 10));
     if (payload_size == 0 || payload_size > MAX_PAYLOAD_SIZE) {
