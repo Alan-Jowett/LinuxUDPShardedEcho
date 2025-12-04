@@ -18,6 +18,8 @@
 // - Services each IOCP using an affinitized thread
 
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 
 #include <algorithm>
 #include <chrono>
@@ -83,10 +85,32 @@ void worker_thread_func(server_worker_context* ctx) try {
         std::osyncstream(std::cout) << std::format("[CPU {}] Worker started\n", ctx->processor_id);
 
     std::vector<epoll_event> events(OUTSTANDING_OPS);
-    // Reuse a single receive buffer to avoid repeated allocations.
-    std::vector<uint8_t> buffer;
-    sockaddr_storage remote_addr;
-    int remote_addr_len = 0;
+
+    // Batch receive/send parameters
+    constexpr int RECV_BATCH = 16;
+    constexpr size_t MAX_MSG_SIZE = 2048;
+
+    // Preallocated per-batch buffers and control structures to avoid allocations
+    std::array<std::array<uint8_t, MAX_MSG_SIZE>, RECV_BATCH> bufs;
+    std::array<iovec, RECV_BATCH> iovecs{};
+    std::array<mmsghdr, RECV_BATCH> recv_msgs{};
+    std::array<sockaddr_storage, RECV_BATCH> src_addrs{};
+    std::array<socklen_t, RECV_BATCH> src_lens{};
+
+    // Prepare static parts of the recv mmsghdrs
+    for (int i = 0; i < RECV_BATCH; ++i) {
+        iovecs[i].iov_base = bufs[i].data();
+        iovecs[i].iov_len = bufs[i].size();
+
+        recv_msgs[i].msg_hdr.msg_iov = &iovecs[i];
+        recv_msgs[i].msg_hdr.msg_iovlen = 1;
+        recv_msgs[i].msg_hdr.msg_name = &src_addrs[i];
+        recv_msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_storage);
+        recv_msgs[i].msg_hdr.msg_control = nullptr;
+        recv_msgs[i].msg_hdr.msg_controllen = 0;
+        recv_msgs[i].msg_hdr.msg_flags = 0;
+        src_lens[i] = sizeof(sockaddr_storage);
+    }
     while (!g_shutdown.load()) {
         // Poll epoll_fd for completions
 
@@ -115,36 +139,86 @@ void worker_thread_func(server_worker_context* ctx) try {
 
             if (ev.events & EPOLLIN) {
                 // Drain the socket: for edge-triggered epoll we must read until EAGAIN
+                // Use recvmmsg/sendmmsg batching on Linux to reduce syscalls
+                uint64_t local_recv = 0, local_sent = 0, local_bytes_recv = 0, local_bytes_sent = 0;
                 while (true) {
-                    bool would_block = post_recv(ctx->socket, buffer, remote_addr, remote_addr_len);
-                    if (would_block) {
-                        break;  // no more data for now
+                    int n = ::recvmmsg(ctx->socket.get(), recv_msgs.data(), RECV_BATCH, MSG_DONTWAIT, nullptr);
+                    if (n == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break; // no more data for now
+                        }
+                        throw socket_exception(std::format("recvmmsg failed: {}", std::strerror(errno)));
                     }
 
-                    // Process received datagram: echo it back
-                    ctx->packets_received.fetch_add(1);
-                    ctx->bytes_received.fetch_add(buffer.size());
+                    if (n == 0) break;
 
-                    if (g_sync_reply.load()) {
-                        // Synchronous reply using sendto
-                        send_sync(ctx->socket, reinterpret_cast<const char*>(buffer.data()),
-                                  buffer.size(), reinterpret_cast<const sockaddr*>(&remote_addr),
-                                  remote_addr_len);
-                        ctx->packets_sent.fetch_add(1);
-                        ctx->bytes_sent.fetch_add(buffer.size());
-                    } else {
-                        // Asynchronous reply using post_send (currently performs non-blocking send)
-                        bool send_would_block = post_send(
-                            ctx->socket, buffer, buffer.size(),
-                            reinterpret_cast<const sockaddr*>(&remote_addr), remote_addr_len);
-                        if (!send_would_block) {
-                            ctx->packets_sent.fetch_add(1);
-                            ctx->bytes_sent.fetch_add(buffer.size());
-                        } else if (g_verbose.load()) {
-                            std::osyncstream(std::cerr) << std::format(
-                                "[CPU {}] send would block, dropping packet\n", ctx->processor_id);
+                    // Prepare outgoing messages for sendmmsg (only in async mode)
+                    std::array<iovec, RECV_BATCH> send_iovecs{};
+                    std::array<mmsghdr, RECV_BATCH> send_msgs{};
+
+                    for (int i = 0; i < n; ++i) {
+                        size_t len = static_cast<size_t>(recv_msgs[i].msg_len);
+                        local_recv += 1;
+                        local_bytes_recv += len;
+
+                        if (g_sync_reply.load()) {
+                            // Synchronous reply: one sendto per packet
+                            ssize_t s = send_sync(ctx->socket, reinterpret_cast<const char*>(bufs[i].data()),
+                                                  len, reinterpret_cast<const sockaddr*>(&src_addrs[i]),
+                                                  recv_msgs[i].msg_hdr.msg_namelen);
+                            if (s >= 0) {
+                                local_sent += 1;
+                                local_bytes_sent += static_cast<uint64_t>(s);
+                            }
+                        } else {
+                            // Build sendmmsg structures
+                            send_iovecs[i].iov_base = bufs[i].data();
+                            send_iovecs[i].iov_len = len;
+
+                            send_msgs[i].msg_hdr.msg_iov = &send_iovecs[i];
+                            send_msgs[i].msg_hdr.msg_iovlen = 1;
+                            send_msgs[i].msg_hdr.msg_name = &src_addrs[i];
+                            send_msgs[i].msg_hdr.msg_namelen = recv_msgs[i].msg_hdr.msg_namelen;
+                            send_msgs[i].msg_hdr.msg_control = nullptr;
+                            send_msgs[i].msg_hdr.msg_controllen = 0;
+                            send_msgs[i].msg_hdr.msg_flags = 0;
+                            send_msgs[i].msg_len = 0;
                         }
                     }
+
+                    if (!g_sync_reply.load()) {
+                        int sent = ::sendmmsg(ctx->socket.get(), send_msgs.data(), n, MSG_DONTWAIT);
+                        if (sent == -1) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                if (g_verbose.load()) {
+                                    std::osyncstream(std::cerr) << std::format("[CPU {}] sendmmsg would block, dropping {} packets\n", ctx->processor_id, n);
+                                }
+                                // None were sent
+                            } else {
+                                throw socket_exception(std::format("sendmmsg failed: {}", std::strerror(errno)));
+                            }
+                        } else {
+                            // Count successful sends and bytes
+                            for (int i = 0; i < sent; ++i) {
+                                local_sent += 1;
+                                local_bytes_sent += send_msgs[i].msg_len ? send_msgs[i].msg_len : send_iovecs[i].iov_len;
+                            }
+
+                            // If partial, optionally log which were dropped
+                            if (sent < n && g_verbose.load()) {
+                                std::osyncstream(std::cerr) << std::format("[CPU {}] sendmmsg partial: sent {}/{}\n", ctx->processor_id, sent, n);
+                            }
+                        }
+                    }
+
+                    // Flush local counters to atomics to avoid per-packet atomic ops
+                    if (local_recv) ctx->packets_received.fetch_add(local_recv);
+                    if (local_sent) ctx->packets_sent.fetch_add(local_sent);
+                    if (local_bytes_recv) ctx->bytes_received.fetch_add(local_bytes_recv);
+                    if (local_bytes_sent) ctx->bytes_sent.fetch_add(local_bytes_sent);
+
+                    // Reset locals for next batch
+                    local_recv = local_sent = local_bytes_recv = local_bytes_sent = 0;
                 }
             }
         }
