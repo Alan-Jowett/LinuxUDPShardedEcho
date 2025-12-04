@@ -1,0 +1,105 @@
+name: Reusable Test (Linux)
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 LinuxUDPShardedEcho contributors
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: downloaded_build/${{ inputs.build_dir }}
+
+      - name: Verify downloaded build
+        run: |
+          if [ ! -d "downloaded_build/${{ inputs.build_dir }}" ]; then
+            echo "Downloaded build not found; failing"
+            exit 1
+          fi
+
+      - name: Run loopback test
+        run: |
+          set -euo pipefail
+
+          SERVER_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server") || true
+          CLIENT_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client") || true
+
+          if [ ! -x "$SERVER_PATH" ]; then
+            echo "Server binary not found or not executable: $SERVER_PATH"
+            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            exit 1
+          fi
+
+          if [ ! -x "$CLIENT_PATH" ]; then
+            echo "Client binary not found or not executable: $CLIENT_PATH"
+            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            exit 1
+          fi
+
+          # Start server in background
+          "$SERVER_PATH" --port 5000 --cores 1 &
+          SERVER_PID=$!
+          echo "Started server pid=$SERVER_PID"
+          sleep 2
+
+          testPassed=false
+          set +e
+          CLIENT_OUTPUT=$("$CLIENT_PATH" --server 127.0.0.1 --port 5000 --payload 64 --cores 1 --duration 10 2>&1)
+          CLIENT_EXIT=$?
+          set -e
+
+          echo "Client exit code: $CLIENT_EXIT"
+          echo "Client output:" 
+          echo "$CLIENT_OUTPUT"
+
+          sent=$(echo "$CLIENT_OUTPUT" | grep -Eo "Packets sent: [0-9]+" | awk '{print $3}' || true)
+          received=$(echo "$CLIENT_OUTPUT" | grep -Eo "Packets received: [0-9]+" | awk '{print $3}' || true)
+
+          sent=${sent:-0}
+          received=${received:-0}
+
+          echo "Packets sent: $sent"
+          echo "Packets received: $received"
+
+          if [ "$sent" -gt 0 ] && [ "$received" -gt 0 ]; then
+            echo "Test PASSED"
+            testPassed=true
+          else
+            echo "Test FAILED: no packets exchanged"
+            testPassed=false
+          fi
+
+          kill $SERVER_PID || true
+
+          if [ "$testPassed" != true ]; then
+            exit 1
+          fi
+
+      - name: Archive build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts

@@ -1,0 +1,26 @@
+name: CI/CD
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 LinuxUDPShardedEcho contributors
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      build_dir: build
+      config: Release
+      artifact_name: build-artifacts
+
+  test:
+    needs: build
+    uses: ./.github/workflows/reusable-test.yml
+    with:
+      build_dir: build
+      config: Release
+      artifact_name: build-artifacts

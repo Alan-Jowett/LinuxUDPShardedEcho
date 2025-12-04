@@ -1,0 +1,57 @@
+name: Reusable Build (Linux)
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 LinuxUDPShardedEcho contributors
+
+on:
+  workflow_call:
+    inputs:
+      build_dir:
+        required: false
+        type: string
+        default: build
+      artifact_name:
+        required: false
+        type: string
+        default: build-artifacts
+      config:
+        required: false
+        type: string
+        default: Release
+      repository: # Default to this repository if not provided
+        required: false
+        type: string
+        default: Alan-Jowett/LinuxUDPShardedEcho
+      ref:
+        required: false
+        type: string
+        default: main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Configure CMake
+        run: cmake -B ${{ inputs.build_dir }} -S . -DCMAKE_BUILD_TYPE=${{ inputs.config }} -G Ninja
+
+      - name: Build
+        run: cmake --build ${{ inputs.build_dir }} --config ${{ inputs.config }} -- -j $(nproc)
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.build_dir }}
