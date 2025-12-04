@@ -21,6 +21,10 @@
 
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <vector>
+#include <array>
 
 #include <chrono>
 #include <csignal>
@@ -191,6 +195,37 @@ void worker_thread_func(client_worker_context* ctx, size_t payload_size) try {
     std::vector<uint8_t> recv_buffer;
     recv_buffer.resize(HEADER_SIZE + payload_size);
 
+    // Batching configuration
+    const int BATCH_SIZE = 16;
+    const size_t MSG_SIZE = HEADER_SIZE + payload_size;
+
+    // Preallocate send-side batch buffers and control structures
+    std::vector<std::vector<uint8_t>> send_bufs(BATCH_SIZE, std::vector<uint8_t>(MSG_SIZE));
+    std::vector<iovec> send_iovecs(BATCH_SIZE);
+    std::vector<mmsghdr> send_msgs(BATCH_SIZE);
+    std::vector<uint64_t> send_batch_seqs(BATCH_SIZE);
+
+    // Preallocate recv-side batch buffers and control structures
+    std::vector<std::vector<uint8_t>> recv_bufs(BATCH_SIZE, std::vector<uint8_t>(MSG_SIZE));
+    std::vector<iovec> recv_iovecs(BATCH_SIZE);
+    std::vector<mmsghdr> recv_msgs(BATCH_SIZE);
+    std::vector<sockaddr_storage> recv_src_addrs(BATCH_SIZE);
+    std::vector<socklen_t> recv_src_lens(BATCH_SIZE, sizeof(sockaddr_storage));
+
+    // Initialize recv mmsghdrs
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+        recv_iovecs[i].iov_base = recv_bufs[i].data();
+        recv_iovecs[i].iov_len = recv_bufs[i].size();
+        recv_msgs[i].msg_hdr.msg_iov = &recv_iovecs[i];
+        recv_msgs[i].msg_hdr.msg_iovlen = 1;
+        recv_msgs[i].msg_hdr.msg_name = &recv_src_addrs[i];
+        recv_msgs[i].msg_hdr.msg_namelen = recv_src_lens[i];
+        recv_msgs[i].msg_hdr.msg_control = nullptr;
+        recv_msgs[i].msg_hdr.msg_controllen = 0;
+        recv_msgs[i].msg_hdr.msg_flags = 0;
+        recv_msgs[i].msg_len = 0;
+    }
+
     // Rate limiting: each worker maintains a quota = elapsed_time * per_worker_rate
     auto start_time = std::chrono::steady_clock::now();
     std::vector<epoll_event> events(ctx->sockets.size());
@@ -208,52 +243,83 @@ void worker_thread_func(client_worker_context* ctx, size_t payload_size) try {
                 (elapsed_ns * ctx->per_worker_rate) / 1'000'000'000;  // per_worker_rate is pps
         }
 
-        // Send packets up to allowed sends
-        while (ctx->packets_sent.load() < allowed_sends) {
-            // Select next socket in round-robin fashion
+        // Send packets up to allowed sends using sendmmsg batching
+        while (ctx->packets_sent.load(std::memory_order_relaxed) < allowed_sends) {
+            bool made_progress = false;
 
-            uint64_t seq = ctx->next_sequence.fetch_add(1);
-
-            // Prepare packet header
-            packet_header header;
-            header.sequence_number = htobe64(seq);
-            header.timestamp_ns = htobe64(
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          std::chrono::steady_clock::now().time_since_epoch())
-                                          .count()));
-
-            // Copy header into send buffer
-            std::memcpy(send_buffer.data(), &header, sizeof(header));
-
-            bool sent = false;
-
-            size_t socket_index = ctx->next_socket_index.fetch_add(1) % ctx->sockets.size();
-
-            for (size_t i = 0; i < ctx->sockets.size(); ++i) {
-                socket_index = (socket_index + 1) % ctx->sockets.size();
+            // Try each socket in round-robin and attempt to send a batch on it
+            size_t start_sock = ctx->next_socket_index.fetch_add(1) % ctx->sockets.size();
+            for (size_t si = 0; si < ctx->sockets.size(); ++si) {
+                size_t socket_index = (start_sock + si) % ctx->sockets.size();
                 unique_fd& sock = ctx->sockets[socket_index];
+                int sock_fd = sock.get();
 
-                // Post send
-                bool would_block =
-                    post_send(sock, send_buffer, payload_size,
-                              reinterpret_cast<sockaddr*>(&ctx->server_addr), ctx->server_addr_len);
-                if (would_block) {
-                    // Socket would block; break to wait for epoll_fd events
-                    continue;
+                // Build a batch up to BATCH_SIZE or until we've satisfied allowed_sends
+                int batch_count = 0;
+                for (; batch_count < BATCH_SIZE && ctx->packets_sent.load(std::memory_order_relaxed) + batch_count < allowed_sends; ++batch_count) {
+                    uint64_t seq = ctx->next_sequence.fetch_add(1);
+
+                    // Prepare packet header
+                    packet_header header;
+                    header.sequence_number = htobe64(seq);
+                    header.timestamp_ns = htobe64(
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count()));
+
+                    // Copy header + payload into batch buffer
+                    std::memcpy(send_bufs[batch_count].data(), &header, sizeof(header));
+                    std::memcpy(send_bufs[batch_count].data() + sizeof(header),
+                                send_buffer.data() + sizeof(header), payload_size);
+
+                    // Setup iovec and mmsghdr
+                    send_iovecs[batch_count].iov_base = send_bufs[batch_count].data();
+                    send_iovecs[batch_count].iov_len = MSG_SIZE;
+
+                    std::memset(&send_msgs[batch_count], 0, sizeof(mmsghdr));
+                    send_msgs[batch_count].msg_hdr.msg_iov = &send_iovecs[batch_count];
+                    send_msgs[batch_count].msg_hdr.msg_iovlen = 1;
+                    send_msgs[batch_count].msg_hdr.msg_name = &ctx->server_addr;
+                    send_msgs[batch_count].msg_hdr.msg_namelen = ctx->server_addr_len;
+                    send_msgs[batch_count].msg_hdr.msg_control = nullptr;
+                    send_msgs[batch_count].msg_hdr.msg_controllen = 0;
+                    send_msgs[batch_count].msg_hdr.msg_flags = 0;
+
+                    send_batch_seqs[batch_count] = seq;
                 }
-                sent = true;
-                break;
+
+                if (batch_count == 0) continue; // nothing to send on this socket
+
+                // Attempt to send the prepared batch
+                int sent = ::sendmmsg(sock_fd, send_msgs.data(), batch_count, MSG_DONTWAIT);
+                if (sent == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Socket would block; try next socket
+                        continue;
+                    }
+                    throw socket_exception(std::format("sendmmsg failed: {}", std::strerror(errno)));
+                }
+
+                // For each successfully sent message, insert sequence into outstanding and update counters
+                for (int i = 0; i < sent; ++i) {
+                    ctx->outstanding_sequences.insert(send_batch_seqs[i]);
+                }
+                if (sent > 0) {
+                    ctx->packets_sent.fetch_add(static_cast<uint64_t>(sent));
+                    ctx->bytes_sent.fetch_add(static_cast<uint64_t>(sent) * MSG_SIZE);
+                    made_progress = true;
+                }
+
+                // If partial batch was sent, stop sending more now (avoid spinning)
+                if (sent < batch_count) {
+                    break;
+                }
             }
 
-            if (!sent) {
-                // All sockets would block; break to wait for epoll_fd events
+            if (!made_progress) {
+                // Couldn't send on any socket; stop and wait for epoll
                 break;
             }
-
-            // Track outstanding sequence number
-            ctx->outstanding_sequences.insert(seq);
-            ctx->packets_sent.fetch_add(1);
-            ctx->bytes_sent.fetch_add(HEADER_SIZE + payload_size);
         }
 
         // Wait for ctx->epoll_fd events or timeout
@@ -280,41 +346,49 @@ void worker_thread_func(client_worker_context* ctx, size_t payload_size) try {
             }
             unique_fd& sock = *it;
 
-            // Process all available packets on this socket
+            // Process available packets on this socket using recvmmsg batching
+            int sock_fd = sock.get();
             while (true) {
-                sockaddr_storage recv_remote{};
-                int recv_remote_len = 0;
-                bool would_block = post_recv(sock, recv_buffer, recv_remote, recv_remote_len);
-                if (would_block) {
-                    // Socket would block; break to wait for epoll_fd events
-                    break;
+                // Reset recv_msgs msg_len/flags
+                for (int k = 0; k < static_cast<int>(recv_msgs.size()); ++k) {
+                    recv_msgs[k].msg_len = 0;
+                    recv_msgs[k].msg_hdr.msg_flags = 0;
+                    recv_msgs[k].msg_hdr.msg_namelen = recv_src_lens[k];
                 }
 
-                // Process received packet
-                if (recv_buffer.size() >= HEADER_SIZE) {
-                    packet_header header;
-                    std::memcpy(&header, recv_buffer.data(), sizeof(header));
-                    uint64_t seq = be64toh(header.sequence_number);
-                    uint64_t timestamp_ns = be64toh(header.timestamp_ns);
-                    uint64_t now_ns = static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
-                            .count());
-                    uint64_t rtt_ns = now_ns - timestamp_ns;
+                int n = ::recvmmsg(sock_fd, recv_msgs.data(), static_cast<unsigned int>(recv_msgs.size()), MSG_DONTWAIT, nullptr);
+                if (n == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        break; // no more data
+                    }
+                    throw socket_exception(std::format("recvmmsg failed: {}", std::strerror(errno)));
+                }
+                if (n == 0) break;
 
-                    // Check if sequence number is outstanding
-                    auto seq_it = ctx->outstanding_sequences.find(seq);
-                    if (seq_it != ctx->outstanding_sequences.end()) {
-                        // Valid echo response
-                        ctx->outstanding_sequences.erase(seq_it);
-                        ctx->packets_received.fetch_add(1);
-                        ctx->bytes_received.fetch_add(HEADER_SIZE + payload_size);
-                        ctx->total_rtt_ns.fetch_add(rtt_ns);
-                        update_min(ctx->min_rtt_ns, rtt_ns);
-                        update_max(ctx->max_rtt_ns, rtt_ns);
+                // Process each received message
+                for (int ri = 0; ri < n; ++ri) {
+                    size_t len = static_cast<size_t>(recv_msgs[ri].msg_len);
+                    if (len >= HEADER_SIZE) {
+                        packet_header header;
+                        std::memcpy(&header, recv_bufs[ri].data(), sizeof(header));
+                        uint64_t seq = be64toh(header.sequence_number);
+                        uint64_t timestamp_ns = be64toh(header.timestamp_ns);
+                        uint64_t now_ns = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+                        uint64_t rtt_ns = now_ns - timestamp_ns;
 
-                        // Post RTT sample to per-worker TDigest
-                        post_rtt(ctx->curren_rtt_tdigest, 1000, rtt_ns);
+                        auto seq_it = ctx->outstanding_sequences.find(seq);
+                        if (seq_it != ctx->outstanding_sequences.end()) {
+                            ctx->outstanding_sequences.erase(seq_it);
+                            ctx->packets_received.fetch_add(1);
+                            ctx->bytes_received.fetch_add(len);
+                            ctx->total_rtt_ns.fetch_add(rtt_ns);
+                            update_min(ctx->min_rtt_ns, rtt_ns);
+                            update_max(ctx->max_rtt_ns, rtt_ns);
+                            post_rtt(ctx->curren_rtt_tdigest, 1000, rtt_ns);
+                        }
                     }
                 }
             }
