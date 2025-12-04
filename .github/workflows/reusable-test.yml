@@ -44,18 +44,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          SERVER_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_server") || true
-          CLIENT_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}/echo_client") || true
+          SERVER_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/echo_server") || true
+          CLIENT_PATH=$(readlink -f "downloaded_build/${{ inputs.build_dir }}/echo_client") || true
 
           if [ ! -x "$SERVER_PATH" ]; then
             echo "Server binary not found or not executable: $SERVER_PATH"
-            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            ls -la "downloaded_build/${{ inputs.build_dir }}" || true
             exit 1
           fi
 
           if [ ! -x "$CLIENT_PATH" ]; then
             echo "Client binary not found or not executable: $CLIENT_PATH"
-            ls -la "downloaded_build/${{ inputs.build_dir }}/${{ inputs.config }}" || true
+            ls -la "downloaded_build/${{ inputs.build_dir }}" || true
             exit 1
           fi
 
