@@ -1,0 +1,8 @@
+{
+  "C_Cpp.default.configurationProvider": "ms-vscode.cpptools",
+  "C_Cpp.default.cppStandard": "c++20",
+  "files.associations": {
+    "*.hpp": "cpp",
+    "*.ipp": "cpp"
+  }
+}
