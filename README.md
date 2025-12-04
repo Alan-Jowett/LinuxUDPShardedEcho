@@ -1,83 +1,64 @@
-<!-- SPDX-License-Identifier: MIT
-  Copyright (c) 2025 LinuxUDPShardedEcho contributors -->
 
-# LinuxUDPShardedEcho - A Scalable Echo Server Demo
+<!-- SPDX-License-Identifier: MIT -->
 
-This implements RFC 862 - [Echo Protocol](https://www.rfc-editor.org/rfc/rfc862)
+# LinuxUDPShardedEcho - A Scalable Echo Server Demo (Linux / epoll)
 
-A high-performance UDP echo server and client implementation for Windows that demonstrates scalable network I/O using:
+This repository contains a high-performance UDP echo server and client optimized for modern
+Linux systems. The implementation demonstrates how to scale UDP packet processing across CPU
+cores using one socket (or a small set of sockets) per worker combined with an `epoll`-based
+event loop and worker threads affinitized to individual CPU cores.
 
-- **SIO_CPU_AFFINITY** - Socket-level CPU affinity to distribute network I/O across cores
-- **IO Completion Ports (IOCP)** - Windows high-performance asynchronous I/O
-- **Thread CPU affinity** - Worker threads pinned to specific CPU cores
-- **One socket per CPU core** - Maximum parallelism with minimal lock contention
-- **Multiple client sockets per worker (client)** - Client can open multiple sockets per worker, each bound to a unique ephemeral port to increase 5-tuple entropy
+Implements RFC 862 - Echo Protocol: https://www.rfc-editor.org/rfc/rfc862
+
 
 ## Requirements
 
-- Windows 10/11 or Windows Server 2016+
-- Visual Studio 2022 or later with C++20 support
+- Linux (kernel 4.x or later recommended)
+- A C++20 capable compiler (`g++` or `clang++`)
 - CMake 3.20 or later
+- Build tools: `make` or Ninja
+
 
 ## Building
 
 ```bash
 # Create build directory
-mkdir build
+mkdir -p build
 cd build
 
-# Configure with CMake
+# Configure with CMake (out-of-source build)
 cmake ..
 
 # Build
 cmake --build . --config Release
 ```
 
-## Usage
+The produced binaries are `echo_server` and `echo_client` and are located in the `build/`
+directory after a successful build.
 
-### Server
 
+## Runtime Behavior & Usage
+
+Both the server and client are command-line programs. They accept similar worker/core,
+buffer, and runtime configuration options. Run either binary with `--help` to see the full list
+of supported flags.
+
+Server example:
 ```bash
-echo_server [options]
+./echo_server --port 5000 --cores 4
 ```
 
-Arguments:
-- `--port, -p <port>`: UDP port to listen on (required, 1-65535)
-- `--cores, -c <num_cores>`: (Optional) Number of CPU cores to use (default: all available)
-- `--recvbuf, -b <bytes>`: (Optional) Socket receive buffer size in bytes (default: 4194304)
-- `--help, -h`: Show help/usage
-- `--stats-file, -o <path>`: (Client only) Write final run statistics as JSON to the given file path.
-
-Example:
+Client example:
 ```bash
-echo_server --port 5000                # Listen on port 5000 using all cores
-echo_server --port 5000 --cores 4      # Listen on port 5000 using 4 cores
+./echo_client --server 127.0.0.1 --port 5000 --sockets 2 --rate 20000 --cores 4 --duration 10
 ```
 
-### Client
-
-```bash
-echo_client [options]
-```
-
-**All Server Options**
-
-- `--port, -p <port>`: UDP port to listen on (required)
-- `--cores, -c <n>`: Number of cores/workers to use (default: all available)
-- `--recvbuf, -b <bytes>`: Socket receive buffer size in bytes (default: `4194304` = 4MB)
-- `--help, -h`: Show help/usage
-
-**All Client Options**
-
-- `--server, -s <host>`: Server hostname or IP (required)
-- `--port, -p <port>`: Server UDP port (required)
-- `--payload, -l <bytes>`: Payload size in bytes (default: `64`, max: `MAX_PAYLOAD_SIZE`)
-- `--cores, -c <n>`: Number of cores/workers to use (default: all available)
-- `--duration, -d <seconds>`: Test duration in seconds (default: `10`)
-- `--rate, -r <pps>`: Packets per second total across all workers (default: `10000`, `0` = unlimited). The client divides this total evenly across workers.
-- `--recvbuf, -b <bytes>`: Socket receive buffer size in bytes (default: `4194304` = 4MB)
-- `--sockets, -k <n>`: Number of sockets to create per worker (default: `1`). Each socket is bound to its own ephemeral port (unique source port).
-- `--help, -h`: Show help/usage
+Common options of interest:
+- `--port, -p <port>` : UDP port to use (server listens; client targets)
+- `--cores, -c <n>` : Number of worker threads / cores to use (default: all available)
+- `--sockets, -k <n>` : Number of sockets per worker (client)
+- `--recvbuf, -b <bytes>` : Socket receive buffer size
+- `--rate, -r <pps>` : Total packets-per-second (client)
 
 
 Example:
@@ -86,35 +67,20 @@ echo_client --server 127.0.0.1 --port 5000 --sockets 4 --rate 20000 --cores 2 --
 echo_client --server 192.168.1.100 --port 5000 --sockets 1 --rate 10000 --payload 1024 --cores 4 --duration 30
 ```
 
+
 ## Architecture
 
-### Server Architecture
+- One (or a small number of) UDP socket(s) per worker thread. Each worker's socket(s) are
+   handled on the same CPU core to improve cache locality and reduce contention.
+- An `epoll`-based event loop is used to efficiently wait for incoming datagrams and dispatch
+   processing to the affinitized worker thread.
+- The client can create multiple sockets per worker to increase source-port entropy when
+   needed for better distribution across RX queues in the NIC and kernel.
+- Per-worker statistics and lightweight estimators (TDigest / PercentileEstimator) collect
+   latency and RTT metrics for reporting.
 
-```
-+------------------+    +------------------+    +------------------+
-|   CPU Core 0     |    |   CPU Core 1     |    |   CPU Core N     |
-+------------------+    +------------------+    +------------------+
-|  Worker Thread   |    |  Worker Thread   |    |  Worker Thread   |
-|  (affinitized)   |    |  (affinitized)   |    |  (affinitized)   |
-+--------+---------+    +--------+---------+    +--------+---------+
-         |                       |                       |
-+--------v---------+    +--------v---------+    +--------v---------+
-|      IOCP        |    |      IOCP        |    |      IOCP        |
-+--------+---------+    +--------+---------+    +--------+---------+
-         |                       |                       |
-+--------v---------+    +--------v---------+    +--------v---------+
-|   UDP Socket     |    |   UDP Socket     |    |   UDP Socket     |
-| (CPU affinitized)|    | (CPU affinitized)|    | (CPU affinitized)|
-+------------------+    +------------------+    +------------------+
-         |                       |                       |
-         +-----------+-----------+-----------+-----------+
-                     |
-              +------v------+
-              |  Port 5000  |
-              +-------------+
-```
 
-### Packet Format
+Packet format used by the examples (sequence + timestamp + payload):
 
 ```
 +------------------------+------------------------+
@@ -126,71 +92,55 @@ echo_client --server 192.168.1.100 --port 5000 --sockets 1 --rate 10000 --payloa
 
 ### Key Features
 
-1. **Socket CPU Affinity (SIO_CPU_AFFINITY)**
-   - Each socket is bound to a specific CPU core
-   - Ensures network stack processing stays on the designated core
-   - Reduces cache misses and improves locality
+- **Per-worker socket(s)**: Each worker thread owns one (or a small set of) UDP socket(s). Keeping
+   socket handling local to a worker improves cache locality and reduces cross-thread contention.
 
-2. **Per-Worker IOCP (server)**
-   - The server uses one socket per worker and a dedicated IOCP serviced by that worker thread
-   - Eliminates contention between cores and keeps callbacks affinitized to the same core
-   - Scales linearly with core count
+- **epoll-based event loop**: Workers wait on an `epoll` instance to receive readiness notifications
+   for their socket(s). `epoll` provides efficient readiness notification and scales well with many
+   file descriptors.
 
-3. **Client: multiple sockets per worker + per-worker IOCP**
-   - The client can create multiple sockets per worker and associate them with the worker's IOCP
-   - Each client socket is bound to a unique ephemeral source port (no SO_REUSEADDR), increasing entropy in the 5-tuple used by the OS hash
-   - This helps the server's packet distribution across cores when only a single destination tuple is used
-4. **Thread Affinity**
-   - Worker threads are pinned to the same core as their socket
-   - Ensures completion callbacks run on the same core as network I/O
-   - Maximizes cache efficiency
+- **Thread / CPU affinity**: Worker threads can be affinitized (pinned) to specific CPU cores to
+   keep packet processing on the same core as the socket handling. This reduces cache misses and
+   improves predictability under load.
 
-5. **Multiple Outstanding Operations**
-   - Multiple async receive operations posted per socket
-   - Prevents gaps in packet reception
-   - Maximizes throughput
+- **Multiple sockets per worker (client option)**: The client can open multiple sockets per worker to
+   increase source-port entropy and improve distribution across NIC RX queues and kernel RSS.
 
-6. **Batched completion retrieval**
-   - Both client and server use `GetQueuedCompletionStatusEx` to retrieve multiple completions per syscall
-   - Reduces syscall overhead and improves batching of I/O completions
+- **Batched processing & concurrency**: Workers batch reads and processing where possible and use
+   per-worker data structures to avoid shared locking hot spots. The server supports both synchronous
+   send paths and non-blocking/asynchronous send flows depending on runtime options.
 
-## Performance Tuning
+- **Lightweight statistics and estimators**: Each worker collects metrics (counts, bytes, and latency
+   samples). The code includes `TDigest` utilitiy used for percentile calculations and reporting.
 
-For best performance:
+- **Practical tuning knobs**: Options for socket receive buffer sizes, worker counts, number of
+   sockets per worker, and packet pacing allow experiments across throughput/latency tradeoffs.
 
-1. Use RSS (Receive Side Scaling) capable NICs
-2. Configure NIC RSS to match the number of cores being used
-3. Ensure the server and client use the same number of cores
-4. Consider disabling interrupt moderation for lowest latency
-5. Increase socket buffer sizes if experiencing drops
 
-## Statistics
+## Performance Notes
 
-The client tracks and reports:
-- Packets sent/received per second
-- Bytes sent/received (throughput in Mbps)
-- Dropped packet count and percentage
-- Round-trip time (min/avg/max in microseconds)
+- Use RSS-capable NICs and configure RSS queues to match the number of cores/workers.
+- Tune socket receive buffer sizes (`SO_RCVBUF`) to avoid drops under high throughput.
+- Pin worker threads to CPU cores (the binaries include options to control affinities).
+
+
+## Tests and Formatting
+
+Run the project's formatting and static checks with the provided script:
+
+```bash
+./scripts/check-format.sh --all --fix
+```
+
+This will run `clang-format` over the repository and `cppcheck` for a lightweight static
+analysis pass.
+
+
+## Contributing
+
+Contributions, bug reports, and performance tuning patches are welcome. Please follow the
+contribution guidelines in `CONTRIBUTING.md`.
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details
-
-## Synchronous Replies vs Overlapped IO
-
-The server supports two reply modes: synchronous blocking replies using `sendto` (enabled
-with `--sync-reply`) and asynchronous overlapped sends using IO Completion Ports (the default).
-Choose based on your workload and goals:
-
-- **Latency (low load):** Synchronous replies can be slightly faster for very small, low-concurrency
-   workloads because they avoid queuing and completion handling overhead.
-- **Throughput (high load):** Overlapped IO with IOCP scales much better under concurrency and
-   network load. Synchronous sends may block a worker thread and cause head-of-line blocking.
-- **Resource model:** Synchronous sends do not consume send-context slots or generate completion
-   events, while overlapped sends use explicit contexts and IOCP notifications.
-- **Robustness and backpressure:** IOCP-based sends are non-blocking and integrate with the OS
-   queuing model; synchronous sends can fail or block and require inline error handling.
-
-Recommendation: keep the default overlapped IO for production and high-throughput testing. Use
-`--sync-reply` for small experiments, micro-benchmarks, or when you explicitly want the simpler
-blocking send path for diagnosis.
+MIT License — see `LICENSE` for details.
